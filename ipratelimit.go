@@ -20,9 +20,9 @@ type IPFunc func(*http.Request) net.IP
 // New return http.Handler that wraps provided handler and applies per-IP rate
 // limiting. Only IPv4 addresses are supported. If ipfunc is nil,
 // IPFromRemoteAddr is used. If burst is less than 1, value 1 is used. For each
-// IP address it uses a separate initially filled "token bucket" equal to size
-// of burst; every interval bucket is refilled by 1 token. If request hits
-// limit, "429 Too Many Requests" response is served.
+// IP address it uses a separate initially filled "token bucket" of burst size;
+// every interval bucket is refilled with a token. If request hits limit, "429
+// Too Many Requests" response is served.
 func New(interval time.Duration, burst int, h http.Handler, ipfunc IPFunc) http.Handler {
 	if h == nil {
 		panic("nil handler")
