@@ -11,14 +11,14 @@ import (
 	"golang.org/x/time/rate"
 )
 
-type IpFunc func(*http.Request) net.IP
+type IPFunc func(*http.Request) net.IP
 
-func New(interval time.Duration, burst int, h http.Handler, ipfunc IpFunc) http.Handler {
+func New(interval time.Duration, burst int, h http.Handler, ipfunc IPFunc) http.Handler {
 	if h == nil {
 		panic("nil handler")
 	}
 	if ipfunc == nil {
-		ipfunc = IpFromRemoteAddr
+		ipfunc = IPFromRemoteAddr
 	}
 	if burst < 1 {
 		burst = 1
@@ -36,7 +36,7 @@ type limiter struct {
 	limit   rate.Limit
 	burst   int
 	handler http.Handler
-	ipfunc  IpFunc
+	ipfunc  IPFunc
 	m       sync.Mutex
 	ipmap   map[uint32]*rate.Limiter
 }
@@ -73,7 +73,7 @@ func (h *limiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.handler.ServeHTTP(w, r)
 }
 
-func IpFromXForwardedFor(r *http.Request) net.IP {
+func IPFromXForwardedFor(r *http.Request) net.IP {
 	ffor := r.Header.Get("X-Forwarded-For")
 	if ffor == "" {
 		return nil
@@ -84,7 +84,7 @@ func IpFromXForwardedFor(r *http.Request) net.IP {
 	return net.ParseIP(ffor)
 }
 
-func IpFromRemoteAddr(r *http.Request) net.IP {
+func IPFromRemoteAddr(r *http.Request) net.IP {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return nil
