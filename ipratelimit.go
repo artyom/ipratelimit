@@ -2,6 +2,7 @@
 package ipratelimit
 
 import (
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -19,11 +20,11 @@ type IPFunc func(*http.Request) net.IP
 
 // New return http.Handler that wraps provided handler and applies per-IP rate
 // limiting. Only IPv4 addresses are supported. If ipfunc is nil,
-// IPFromRemoteAddr is used. If burst is less than 1, value 1 is used. For each
-// IP address it uses a separate initially filled "token bucket" of burst size;
-// every interval bucket is refilled with a token. If request hits limit, "429
-// Too Many Requests" response is served.
-func New(interval time.Duration, burst int, h http.Handler, ipfunc IPFunc) http.Handler {
+// IPFromRemoteAddr is used. If burst is less than 1, value 1 is used. If logger
+// is nil, logging is disabled. For each IP address it uses a separate initially
+// filled "token bucket" of burst size; every interval bucket is refilled with
+// a token. If request hits limit, "429 Too Many Requests" response is served.
+func New(interval time.Duration, burst int, h http.Handler, ipfunc IPFunc, logger *log.Logger) http.Handler {
 	if h == nil {
 		panic("nil handler")
 	}
@@ -39,6 +40,7 @@ func New(interval time.Duration, burst int, h http.Handler, ipfunc IPFunc) http.
 		handler: h,
 		ipfunc:  ipfunc,
 		ipmap:   make(map[uint32]*rate.Limiter, MaxCapacity),
+		log:     logger,
 	}
 }
 
@@ -49,6 +51,7 @@ type limiter struct {
 	ipfunc  IPFunc
 	m       sync.Mutex
 	ipmap   map[uint32]*rate.Limiter
+	log     *log.Logger
 }
 
 func (h *limiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -76,8 +79,10 @@ func (h *limiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	h.m.Unlock()
 	if !lim.Allow() {
-		//log.Printf("rate limited for %v (exceeds limit of %v/second)", net.IP(key[:]), lim.Limit()) // XXX
 		http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+		if h.log != nil {
+			h.log.Printf("rate limited for %v: %s %s", ip, r.Method, r.URL)
+		}
 		return
 	}
 	h.handler.ServeHTTP(w, r)

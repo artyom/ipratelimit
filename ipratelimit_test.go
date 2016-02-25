@@ -16,7 +16,7 @@ func BenchmarkLimiter(b *testing.B) {
 	}
 	req.Header.Set("X-Forwarded-For", "192.168.0.1")
 	handler := func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("hello\n")) }
-	lh := New(time.Second/10, 5, http.HandlerFunc(handler), IPFromXForwardedFor)
+	lh := New(time.Second/10, 5, http.HandlerFunc(handler), IPFromXForwardedFor, nil)
 	var allowed, limited int
 	for i := 0; i < b.N; i++ {
 		w := httptest.NewRecorder()
@@ -33,7 +33,7 @@ func BenchmarkLimiter(b *testing.B) {
 
 func Example() {
 	handler := func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "Hello, world!") }
-	lh := New(time.Second/2, 2, http.HandlerFunc(handler), nil)
+	lh := New(time.Second/2, 2, http.HandlerFunc(handler), nil, nil)
 	ts := httptest.NewServer(lh)
 	defer ts.Close()
 	for i := 0; i < 3; i++ {
