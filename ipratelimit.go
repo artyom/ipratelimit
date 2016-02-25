@@ -1,3 +1,4 @@
+// Package ipratelimit provides http.Handler capable of per-IP rate limiting
 package ipratelimit
 
 import (
@@ -11,8 +12,17 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// IPFunc type function should extract IP address from http request. If returned
+// IP is nil or it is not a valid IPv4 (IP.To4() returns nil), request is
+// allowed without additional processing.
 type IPFunc func(*http.Request) net.IP
 
+// New return http.Handler that wraps provided handler and applies per-IP rate
+// limiting. Only IPv4 addresses are supported. If ipfunc is nil,
+// IPFromRemoteAddr is used. If burst is less than 1, value 1 is used. For each
+// IP address it uses a separate initially filled "token bucket" equal to size
+// of burst; every interval bucket is refilled by 1 token. If request hits
+// limit, "429 Too Many Requests" response is served.
 func New(interval time.Duration, burst int, h http.Handler, ipfunc IPFunc) http.Handler {
 	if h == nil {
 		panic("nil handler")
@@ -28,7 +38,7 @@ func New(interval time.Duration, burst int, h http.Handler, ipfunc IPFunc) http.
 		burst:   burst,
 		handler: h,
 		ipfunc:  ipfunc,
-		ipmap:   make(map[uint32]*rate.Limiter, mapCap),
+		ipmap:   make(map[uint32]*rate.Limiter, MaxCapacity),
 	}
 }
 
@@ -54,7 +64,7 @@ func (h *limiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		lim = rate.NewLimiter(h.limit, h.burst)
 		h.ipmap[key] = lim
 	}
-	if l := len(h.ipmap); l >= mapCap {
+	if l := len(h.ipmap); l >= MaxCapacity {
 		i, r := 0, rand.Intn(10)
 		for k := range h.ipmap {
 			// remove random 10% of map
@@ -73,6 +83,8 @@ func (h *limiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.handler.ServeHTTP(w, r)
 }
 
+// IPFromXForwardedFor extracts first IP address from X-Forwarded-For header of
+// the request
 func IPFromXForwardedFor(r *http.Request) net.IP {
 	ffor := r.Header.Get("X-Forwarded-For")
 	if ffor == "" {
@@ -84,6 +96,8 @@ func IPFromXForwardedFor(r *http.Request) net.IP {
 	return net.ParseIP(ffor)
 }
 
+// IPFromRemoteAddr returns IP address of connected client, use this only if
+// clients connect directly to your service.
 func IPFromRemoteAddr(r *http.Request) net.IP {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -105,4 +119,5 @@ func ip2key(ip net.IP) uint32 {
 	return u
 }
 
-const mapCap = 100000
+// maximum number of IPs to track, on overflow evict random items
+const MaxCapacity = 100000
