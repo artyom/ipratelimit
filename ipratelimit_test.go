@@ -1,6 +1,8 @@
 package ipratelimit
 
 import (
+	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -27,4 +29,22 @@ func BenchmarkLimiter(b *testing.B) {
 		}
 	}
 	b.Logf("reqs %d, allowed/limited: %d/%d ", allowed+limited, allowed, limited)
+}
+
+func Example() {
+	handler := func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "Hello, world!") }
+	lh := New(time.Second/2, 2, http.HandlerFunc(handler), nil)
+	ts := httptest.NewServer(lh)
+	defer ts.Close()
+	for i := 0; i < 3; i++ {
+		res, err := http.Get(ts.URL)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(res.Status)
+	}
+	// Output:
+	// 200 OK
+	// 200 OK
+	// 429 Too Many Requests
 }
