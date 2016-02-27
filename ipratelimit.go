@@ -9,8 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/time/rate"
 )
 
 // IPFunc type function should extract IP address from http request. If returned
@@ -28,6 +26,9 @@ func New(interval time.Duration, burst int, h http.Handler, ipfunc IPFunc, logge
 	if h == nil {
 		panic("nil handler")
 	}
+	if interval <= 0 {
+		panic("non-positive interval")
+	}
 	if ipfunc == nil {
 		ipfunc = IPFromRemoteAddr
 	}
@@ -35,23 +36,28 @@ func New(interval time.Duration, burst int, h http.Handler, ipfunc IPFunc, logge
 		burst = 1
 	}
 	return &limiter{
-		limit:   rate.Every(interval),
-		burst:   burst,
-		handler: h,
-		ipfunc:  ipfunc,
-		ipmap:   make(map[uint32]*rate.Limiter, MaxCapacity),
-		log:     logger,
+		refillEvery: float64(interval),
+		burst:       float64(burst),
+		handler:     h,
+		ipfunc:      ipfunc,
+		ipmap:       make(map[uint32]*bucket, MaxCapacity),
+		log:         logger,
 	}
 }
 
 type limiter struct {
-	limit   rate.Limit
-	burst   int
-	handler http.Handler
-	ipfunc  IPFunc
-	m       sync.Mutex
-	ipmap   map[uint32]*rate.Limiter
-	log     *log.Logger
+	refillEvery float64
+	burst       float64
+	handler     http.Handler
+	ipfunc      IPFunc
+	m           sync.Mutex
+	ipmap       map[uint32]*bucket
+	log         *log.Logger
+}
+
+type bucket struct {
+	left  float64   // tokens left
+	mtime time.Time // last access time
 }
 
 func (h *limiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -61,11 +67,13 @@ func (h *limiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := ip2key(ip)
+	now := time.Now()
+	var allow bool
 	h.m.Lock()
-	lim, ok := h.ipmap[key]
+	bkt, ok := h.ipmap[key]
 	if !ok {
-		lim = rate.NewLimiter(h.limit, h.burst)
-		h.ipmap[key] = lim
+		bkt = &bucket{left: h.burst}
+		h.ipmap[key] = bkt
 	}
 	if l := len(h.ipmap); l >= MaxCapacity {
 		i, r := 0, rand.Intn(10)
@@ -77,8 +85,25 @@ func (h *limiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			i++
 		}
 	}
+
+	if !bkt.mtime.IsZero() {
+		// refill bucket
+		spent := now.Sub(bkt.mtime)
+		if refillBy := float64(spent) / h.refillEvery; refillBy > 0 {
+			bkt.left += refillBy
+			if bkt.left > h.burst {
+				bkt.left = h.burst
+			}
+		}
+	}
+	if bkt.left >= 1 {
+		bkt.left -= 1
+		allow = true
+	}
+	bkt.mtime = now
+
 	h.m.Unlock()
-	if !lim.Allow() {
+	if !allow {
 		http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 		if h.log != nil {
 			h.log.Printf("rate limited for %v: %s %s", ip, r.Method, r.URL)
