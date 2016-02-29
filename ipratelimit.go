@@ -60,15 +60,9 @@ type bucket struct {
 	mtime time.Time // last access time
 }
 
-func (h *limiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	ip := h.ipfunc(r)
-	if ip == nil || ip.To4() == nil {
-		h.handler.ServeHTTP(w, r)
-		return
-	}
+func (h *limiter) allow(ip net.IP) (allow, evictDone bool, evictDuration time.Duration) {
 	key := ip2key(ip)
 	now := time.Now()
-	var allow bool
 	h.m.Lock()
 	bkt, ok := h.ipmap[key]
 	if !ok {
@@ -84,6 +78,8 @@ func (h *limiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			i++
 		}
+		evictDone = true
+		evictDuration = time.Since(now)
 	}
 
 	if !bkt.mtime.IsZero() {
@@ -103,6 +99,19 @@ func (h *limiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	bkt.mtime = now
 
 	h.m.Unlock()
+	return allow, evictDone, evictDuration
+}
+
+func (h *limiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ip := h.ipfunc(r)
+	if ip == nil || ip.To4() == nil {
+		h.handler.ServeHTTP(w, r)
+		return
+	}
+	allow, evictDone, evictDuration := h.allow(ip)
+	if evictDone && h.log != nil {
+		h.log.Print("excess limit buckets evicted in ", evictDuration)
+	}
 	if !allow {
 		http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 		if h.log != nil {
