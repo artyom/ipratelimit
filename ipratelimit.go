@@ -40,7 +40,7 @@ func New(interval time.Duration, burst int, h http.Handler, ipfunc IPFunc, logge
 		burst:       float64(burst),
 		handler:     h,
 		ipfunc:      ipfunc,
-		ipmap:       make(map[uint32]*bucket, MaxCapacity),
+		ipmap:       make(map[uint32]bucket, MaxCapacity),
 		log:         logger,
 	}
 }
@@ -51,13 +51,13 @@ type limiter struct {
 	handler     http.Handler
 	ipfunc      IPFunc
 	m           sync.Mutex
-	ipmap       map[uint32]*bucket
+	ipmap       map[uint32]bucket
 	log         *log.Logger
 }
 
 type bucket struct {
-	left  float64   // tokens left
-	mtime time.Time // last access time
+	left  float64 // tokens left
+	mtime int64   // last access time as nanoseconds since Unix epoch
 }
 
 func (h *limiter) allow(ip net.IP) (allow, evictDone bool, evictDuration time.Duration) {
@@ -66,8 +66,7 @@ func (h *limiter) allow(ip net.IP) (allow, evictDone bool, evictDuration time.Du
 	h.m.Lock()
 	bkt, ok := h.ipmap[key]
 	if !ok {
-		bkt = &bucket{left: h.burst}
-		h.ipmap[key] = bkt
+		bkt = bucket{left: h.burst}
 	}
 	if l := len(h.ipmap); l >= MaxCapacity {
 		i, r := 0, rand.Intn(10)
@@ -82,9 +81,9 @@ func (h *limiter) allow(ip net.IP) (allow, evictDone bool, evictDuration time.Du
 		evictDuration = time.Since(now)
 	}
 
-	if !bkt.mtime.IsZero() {
+	if bkt.mtime != 0 {
 		// refill bucket
-		spent := now.Sub(bkt.mtime)
+		spent := now.Sub(time.Unix(0, bkt.mtime))
 		if refillBy := float64(spent) / h.refillEvery; refillBy > 0 {
 			bkt.left += refillBy
 			if bkt.left > h.burst {
@@ -96,7 +95,8 @@ func (h *limiter) allow(ip net.IP) (allow, evictDone bool, evictDuration time.Du
 		bkt.left -= 1
 		allow = true
 	}
-	bkt.mtime = now
+	bkt.mtime = now.UnixNano()
+	h.ipmap[key] = bkt
 
 	h.m.Unlock()
 	return allow, evictDone, evictDuration
