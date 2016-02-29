@@ -3,7 +3,6 @@ package ipratelimit
 
 import (
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
 	"strings"
@@ -41,6 +40,7 @@ func New(interval time.Duration, burst int, h http.Handler, ipfunc IPFunc, logge
 		handler:     h,
 		ipfunc:      ipfunc,
 		ipmap:       make(map[uint32]bucket, MaxCapacity),
+		keys:        make(chan uint32, MaxCapacity),
 		log:         logger,
 	}
 }
@@ -52,6 +52,7 @@ type limiter struct {
 	ipfunc      IPFunc
 	m           sync.Mutex
 	ipmap       map[uint32]bucket
+	keys        chan uint32 // fifo queue of unique keys, chan must be buffered to the size of ipmap
 	log         *log.Logger
 }
 
@@ -64,21 +65,32 @@ func (h *limiter) allow(ip net.IP) (allow, evictDone bool, evictDuration time.Du
 	key := ip2key(ip)
 	now := time.Now()
 	h.m.Lock()
+	defer h.m.Unlock()
 	bkt, ok := h.ipmap[key]
 	if !ok {
 		bkt = bucket{left: h.burst}
 	}
 	if l := len(h.ipmap); l >= MaxCapacity {
-		i, r := 0, rand.Intn(10)
-		for k := range h.ipmap {
-			// remove random 10% of map
-			if i%10 == r {
+		for i := 0; i < MaxCapacity/10; i++ {
+			select {
+			case k := <-h.keys:
 				delete(h.ipmap, k)
+			default:
+				panic("receive from h.keys is blocked")
 			}
-			i++
 		}
 		evictDone = true
 		evictDuration = time.Since(now)
+	}
+	if !ok {
+		// push new key to fifo queue here and not above because it's
+		// essential to do eviction before pushing to ensure queue has
+		// free space
+		select {
+		case h.keys <- key:
+		default:
+			panic("push to h.keys is blocked")
+		}
 	}
 
 	if bkt.mtime != 0 {
@@ -98,7 +110,6 @@ func (h *limiter) allow(ip net.IP) (allow, evictDone bool, evictDuration time.Du
 	bkt.mtime = now.UnixNano()
 	h.ipmap[key] = bkt
 
-	h.m.Unlock()
 	return allow, evictDone, evictDuration
 }
 
