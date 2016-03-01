@@ -10,23 +10,57 @@ import (
 	"time"
 )
 
+// Config holds rate limiter configuration
+type Config struct {
+	RefillEvery time.Duration // interval to refill bucket by single token up to Burst size
+	Burst       int           // bucket capacity
+	MaxBuckets  int           // maximum number of buckets — per-IP states to keep; on overflow oldest records would be evicted
+	IPFunc      IPFunc        // function to extract IPv4 address from http request
+	Logger      *log.Logger   // if nil, nothing would be logged
+}
+
+// DefaultConfig returns config with safe defaults: 100k buckets of 10 tokens
+// each refilled every 100 millisecond (10rps rate), IPFunc set to
+// IPFromRemoteAddr
+func DefaultConfig() *Config {
+	cfg := defaultConfig
+	return &cfg
+}
+
+var defaultConfig = Config{
+	RefillEvery: time.Second / 10,
+	Burst:       10,
+	MaxBuckets:  100000,
+	IPFunc:      IPFromRemoteAddr,
+}
+
 // IPFunc type function should extract IP address from http request. If returned
 // IP is nil or it is not a valid IPv4 (IP.To4() returns nil), request is
 // allowed without additional processing.
 type IPFunc func(*http.Request) net.IP
 
-// New return http.Handler that wraps provided handler and applies per-IP rate
-// limiting. Only IPv4 addresses are supported. If ipfunc is nil,
-// IPFromRemoteAddr is used. If burst is less than 1, value 1 is used. If logger
-// is nil, logging is disabled. For each IP address it uses a separate initially
-// filled "token bucket" of burst size; every interval bucket is refilled with
-// a token. If request hits limit, "429 Too Many Requests" response is served.
-func New(interval time.Duration, burst int, h http.Handler, ipfunc IPFunc, logger *log.Logger) http.Handler {
+// New returns http.Handler that wraps provided handler and applies per-IP rate
+// limiting. Only IPv4 addresses are supported. If config is nil, safe defaults
+// would be used (see DefaultConfig). If some values in config is out of sane
+// range, they would be replaced by low stub values.
+//
+// For each IP address this handler uses a separate prefilled "token bucket" of
+// burst size; every interval bucket is refilled with a token. If request hits
+// limit, "429 Too Many Requests" response is served.
+func New(h http.Handler, config *Config) http.Handler {
 	if h == nil {
 		panic("nil handler")
 	}
+	cfg := config
+	if cfg == nil {
+		cfg = &defaultConfig
+	}
+	interval := cfg.RefillEvery
+	burst := cfg.Burst
+	ipfunc := cfg.IPFunc
+	maxCapacity := cfg.MaxBuckets
 	if interval <= 0 {
-		panic("non-positive interval")
+		interval = defaultConfig.RefillEvery
 	}
 	if ipfunc == nil {
 		ipfunc = IPFromRemoteAddr
@@ -34,14 +68,17 @@ func New(interval time.Duration, burst int, h http.Handler, ipfunc IPFunc, logge
 	if burst < 1 {
 		burst = 1
 	}
+	if maxCapacity < 100 {
+		maxCapacity = defaultConfig.MaxBuckets
+	}
 	return &limiter{
 		refillEvery: float64(interval),
 		burst:       float64(burst),
 		handler:     h,
 		ipfunc:      ipfunc,
-		ipmap:       make(map[uint32]bucket, MaxCapacity),
-		keys:        make(chan uint32, MaxCapacity),
-		log:         logger,
+		ipmap:       make(map[uint32]bucket, maxCapacity),
+		keys:        make(chan uint32, maxCapacity),
+		log:         cfg.Logger,
 	}
 }
 
@@ -70,8 +107,8 @@ func (h *limiter) allow(ip net.IP) (allow, evictDone bool, evictDuration time.Du
 	if !ok {
 		bkt = bucket{left: h.burst}
 	}
-	if l := len(h.ipmap); l >= MaxCapacity {
-		for i := 0; i < MaxCapacity/10; i++ {
+	if maxCap := cap(h.keys); len(h.ipmap) >= maxCap {
+		for i := 0; i < maxCap/10; i++ {
 			select {
 			case k := <-h.keys:
 				delete(h.ipmap, k)
@@ -104,7 +141,7 @@ func (h *limiter) allow(ip net.IP) (allow, evictDone bool, evictDuration time.Du
 		}
 	}
 	if bkt.left >= 1 {
-		bkt.left -= 1
+		bkt.left--
 		allow = true
 	}
 	bkt.mtime = now.UnixNano()
@@ -168,6 +205,3 @@ func ip2key(ip net.IP) uint32 {
 	u |= uint32(ip[3])
 	return u
 }
-
-// maximum number of IPs to track, on overflow evict random items
-const MaxCapacity = 100000
