@@ -2,21 +2,22 @@
 package ipratelimit
 
 import (
-	"log"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/artyom/logger"
 )
 
 // Config holds rate limiter configuration
 type Config struct {
-	RefillEvery time.Duration // interval to refill bucket by single token up to Burst size
-	Burst       int           // bucket capacity
-	MaxBuckets  int           // maximum number of buckets — per-IP states to keep; on overflow oldest records would be evicted
-	IPFunc      IPFunc        // function to extract IPv4 address from http request
-	Logger      *log.Logger   // if nil, nothing would be logged
+	RefillEvery time.Duration    // interval to refill bucket by single token up to Burst size
+	Burst       int              // bucket capacity
+	MaxBuckets  int              // maximum number of buckets — per-IP states to keep; on overflow oldest records would be evicted
+	IPFunc      IPFunc           // function to extract IPv4 address from http request
+	Logger      logger.Interface // if nil, nothing would be logged
 }
 
 // DefaultConfig returns config with safe defaults: 100k buckets of 10 tokens
@@ -71,6 +72,10 @@ func New(h http.Handler, config *Config) http.Handler {
 	if maxCapacity < 100 {
 		maxCapacity = defaultConfig.MaxBuckets
 	}
+	log := cfg.Logger
+	if log == nil {
+		log = logger.Noop
+	}
 	return &limiter{
 		refillEvery: float64(interval),
 		burst:       float64(burst),
@@ -78,7 +83,7 @@ func New(h http.Handler, config *Config) http.Handler {
 		ipfunc:      ipfunc,
 		ipmap:       make(map[uint32]bucket, maxCapacity),
 		keys:        make(chan uint32, maxCapacity),
-		log:         cfg.Logger,
+		log:         log,
 	}
 }
 
@@ -90,7 +95,7 @@ type limiter struct {
 	m           sync.Mutex
 	ipmap       map[uint32]bucket
 	keys        chan uint32 // fifo queue of unique keys, chan must be buffered to the size of ipmap
-	log         *log.Logger
+	log         logger.Interface
 }
 
 type bucket struct {
@@ -157,14 +162,12 @@ func (h *limiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	allow, evictDone, evictDuration := h.allow(ip)
-	if evictDone && h.log != nil {
+	if evictDone {
 		h.log.Print("excess limit buckets evicted in ", evictDuration)
 	}
 	if !allow {
 		http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
-		if h.log != nil {
-			h.log.Printf("rate limited for %v: %s %s", ip, r.Method, r.URL)
-		}
+		h.log.Printf("rate limited for %v: %s %s", ip, r.Method, r.URL)
 		return
 	}
 	h.handler.ServeHTTP(w, r)
