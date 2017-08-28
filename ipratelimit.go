@@ -4,6 +4,7 @@ package ipratelimit
 import (
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -76,9 +77,11 @@ func New(h http.Handler, config *Config) http.Handler {
 	if log == nil {
 		log = logger.Noop
 	}
+	retryAfter := int(interval.Truncate(time.Second)/time.Second) + 1
 	return &limiter{
 		refillEvery: float64(interval),
 		burst:       float64(burst),
+		retryAfter:  strconv.Itoa(retryAfter),
 		handler:     h,
 		ipfunc:      ipfunc,
 		ipmap:       make(map[uint32]bucket, maxCapacity),
@@ -90,6 +93,7 @@ func New(h http.Handler, config *Config) http.Handler {
 type limiter struct {
 	refillEvery float64
 	burst       float64
+	retryAfter  string
 	handler     http.Handler
 	ipfunc      IPFunc
 	m           sync.Mutex
@@ -166,6 +170,7 @@ func (h *limiter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.log.Print("excess limit buckets evicted in ", evictDuration)
 	}
 	if !allow {
+		w.Header().Set("Retry-After", h.retryAfter)
 		http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 		h.log.Printf("rate limited for %v: %s %s", ip, r.Method, r.URL)
 		return
