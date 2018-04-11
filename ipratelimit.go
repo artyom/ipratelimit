@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/artyom/logger"
+	"github.com/cespare/xxhash"
 )
 
 // Config holds rate limiter configuration
@@ -17,7 +18,7 @@ type Config struct {
 	RefillEvery time.Duration    // interval to refill bucket by single token up to Burst size
 	Burst       int              // bucket capacity
 	MaxBuckets  int              // maximum number of buckets — per-IP states to keep; on overflow oldest records would be evicted
-	IPFunc      IPFunc           // function to extract IPv4 address from http request
+	IPFunc      IPFunc           // function to extract IP address from http request
 	Logger      logger.Interface // if nil, nothing would be logged
 }
 
@@ -37,14 +38,13 @@ var defaultConfig = Config{
 }
 
 // IPFunc type function should extract IP address from http request. If returned
-// IP is nil or it is not a valid IPv4 (IP.To4() returns nil), request is
-// allowed without additional processing.
+// IP is nil, request is allowed without additional processing.
 type IPFunc func(*http.Request) net.IP
 
 // New returns http.Handler that wraps provided handler and applies per-IP rate
-// limiting. Only IPv4 addresses are supported. If config is nil, safe defaults
-// would be used (see DefaultConfig). If some values in config is out of sane
-// range, they would be replaced by low stub values.
+// limiting. If config is nil, safe defaults would be used (see DefaultConfig).
+// If some values in config is out of sane range, they would be replaced by low
+// stub values.
 //
 // For each IP address this handler uses a separate prefilled "token bucket" of
 // burst size; every interval bucket is refilled with a token. If request hits
@@ -84,8 +84,8 @@ func New(h http.Handler, config *Config) http.Handler {
 		retryAfter:  strconv.Itoa(retryAfter),
 		handler:     h,
 		ipfunc:      ipfunc,
-		ipmap:       make(map[uint32]bucket, maxCapacity),
-		keys:        make(chan uint32, maxCapacity),
+		ipmap:       make(map[uint64]bucket, maxCapacity),
+		keys:        make(chan uint64, maxCapacity),
 		log:         log,
 	}
 }
@@ -97,8 +97,8 @@ type limiter struct {
 	handler     http.Handler
 	ipfunc      IPFunc
 	m           sync.Mutex
-	ipmap       map[uint32]bucket
-	keys        chan uint32 // fifo queue of unique keys, chan must be buffered to the size of ipmap
+	ipmap       map[uint64]bucket
+	keys        chan uint64 // fifo queue of unique keys, chan must be buffered to the size of ipmap
 	log         logger.Interface
 }
 
@@ -108,7 +108,7 @@ type bucket struct {
 }
 
 func (h *limiter) allow(ip net.IP) (allow, evictDone bool, evictDuration time.Duration) {
-	key := ip2key(ip)
+	key := xxhash.Sum64(ip)
 	now := time.Now()
 	h.m.Lock()
 	defer h.m.Unlock()
@@ -199,17 +199,4 @@ func IPFromRemoteAddr(r *http.Request) net.IP {
 		return nil
 	}
 	return net.ParseIP(host)
-}
-
-func ip2key(ip net.IP) uint32 {
-	ip = ip.To4()
-	if ip == nil {
-		panic("non ipv4 ip")
-	}
-	var u uint32
-	u |= uint32(ip[0]) << 24
-	u |= uint32(ip[1]) << 16
-	u |= uint32(ip[2]) << 8
-	u |= uint32(ip[3])
-	return u
 }
